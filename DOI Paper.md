@@ -5,7 +5,7 @@ tags: meta/library
 
 # DOI Paper Import
 
-A Space Lua library for creating research paper notes from a DOI. Supports papers registered with CrossRef (ACM Digital Library, IEEE Xplore, and most other publishers) as well as arXiv preprints.
+A Space Lua library for creating research paper notes from a DOI. Supports papers registered with CrossRef (ACM Digital Library, IEEE Xplore, arXiv, and most other publishers).
 
 ## Usage
 
@@ -13,12 +13,12 @@ Run the **Paper: Import from DOI** command from the command palette. Enter a DOI
 
 ## Supported Identifiers
 
-| Input Format | Example                       | Resolution Method |
-| ------------ | ----------------------------- | ----------------- |
-| DOI (bare)   | `10.1145/3582016.3582063`     | CrossRef REST API |
-| DOI (URL)    | `https://doi.org/10.1145/...` | CrossRef REST API |
-| arXiv ID     | `2301.13808`                  | arXiv Atom API    |
-| arXiv DOI    | `10.48550/arXiv.2301.13808`   | arXiv Atom API    |
+| Input Format | Example | Resolution Method |
+|---|---|---|
+| DOI (bare) | `10.1145/3582016.3582063` | CrossRef REST API |
+| DOI (URL) | `https://doi.org/10.1145/...` | CrossRef REST API |
+| arXiv ID | `2301.13808` | CrossRef REST API |
+| arXiv DOI | `10.48550/arXiv.2301.13808` | CrossRef REST API |
 
 ## Generated Frontmatter
 
@@ -47,7 +47,7 @@ You can customize the page path prefix and default tags in your `CONFIG` page:
 ```space-lua
 config.set {
   doiPaper = {
-    prefix = "papers",       -- page path prefix (default: "Papers")
+    prefix = "Papers",       -- page path prefix (default: "Papers")
     tags = {"paper", "unread"} -- default tags (default: {"paper", "unread"})
   }
 }
@@ -62,19 +62,41 @@ doi_paper = doi_paper or {}
 
 -- Sanitize a title for use as a page name
 function doi_paper.sanitize_page_name(title)
-  -- Remove characters that are problematic in page names
   local clean = title
   clean = string.gsub(clean, "[/\\#%[%]|{}]", "")
   clean = string.gsub(clean, "%s+", " ")
   clean = string.trim(clean)
-  -- Truncate to reasonable length
   if #clean > 120 then
     clean = string.sub(clean, 1, 120)
   end
   return clean
 end
 
+-- Escape a string for safe inclusion inside a YAML double-quoted value.
+-- Guards against injection of arbitrary frontmatter keys via crafted
+-- paper titles, author names, venue names, etc.
+local function yaml_escape(s)
+  if not s then return "" end
+  s = string.gsub(s, "\\", "\\\\")
+  s = string.gsub(s, '"', '\\"')
+  s = string.gsub(s, "\n", "\\n")
+  s = string.gsub(s, "\r", "\\r")
+  s = string.gsub(s, "\t", "\\t")
+  return s
+end
+
+-- Sanitize a block of text used in the page body (outside frontmatter).
+-- Strips lines that could be interpreted as YAML frontmatter delimiters.
+local function sanitize_body_text(s)
+  if not s then return "" end
+  s = string.gsub(s, "\n%-%-%-\n", "\n")
+  s = string.gsub(s, "^%-%-%-\n", "")
+  s = string.gsub(s, "\n%-%-%-$", "")
+  return s
+end
+
 -- Detect identifier type from user input
+-- Everything is resolved via CrossRef; bare arXiv IDs get a DOI constructed
 function doi_paper.parse_identifier(input)
   input = string.trim(input)
 
@@ -83,16 +105,18 @@ function doi_paper.parse_identifier(input)
   input = string.gsub(input, "^https?://dx%.doi%.org/", "")
   input = string.gsub(input, "^https?://arxiv%.org/abs/", "")
 
-  -- Check if it's an arXiv DOI already (10.48550/arXiv.XXXX.XXXXX)
+  -- arXiv DOI already (10.48550/arXiv.XXXX.XXXXX)
   if string.match(input, "^10%.48550/arXiv%.") then
     return { type = "doi", id = input }
   end
 
-  -- Bare arXiv ID (YYMM.NNNNN or old format like hep-th/9901001) -> construct DOI
+  -- Bare arXiv ID (YYMM.NNNNN with optional version suffix)
   if string.match(input, "^%d%d%d%d%.%d%d%d%d%d?v?%d*$") then
     local base = string.gsub(input, "v%d+$", "")
     return { type = "doi", id = "10.48550/arXiv." .. base }
   end
+
+  -- Old-style arXiv ID (e.g. hep-th/9901001)
   if string.match(input, "^[a-z%-]+/%d+v?%d*$") then
     local base = string.gsub(input, "v%d+$", "")
     return { type = "doi", id = "10.48550/arXiv." .. base }
@@ -104,6 +128,14 @@ function doi_paper.parse_identifier(input)
   end
 
   return nil
+end
+
+-- Helper: safely get a value from a table using a key that may contain hyphens
+-- After the JSON round-trip this should work with normal bracket access,
+-- but we guard against nil at every step to avoid "index a nil value" errors.
+local function safe_get(tbl, key)
+  if tbl == nil then return nil end
+  return tbl[key]
 end
 
 -- Fetch metadata from CrossRef for a DOI
@@ -120,7 +152,22 @@ function doi_paper.fetch_crossref(doi)
     return nil, "CrossRef API returned status " .. tostring(resp.status)
   end
 
-  local data = resp.body
+  -- Round-trip: the auto-parsed JS object doesn't handle hyphenated keys
+  -- (like "date-parts", "container-title") well in Space Lua.
+  -- Stringify back to JSON, then re-parse with YAML.parse to get a proper Lua table.
+  local body = resp.body
+  local body_str
+  if type(body) == "string" then
+    body_str = body
+  else
+    body_str = js.JSON.stringify(body)
+  end
+  local data = YAML.parse(body_str)
+
+  if not data or not data.message then
+    return nil, "Unexpected response structure from CrossRef"
+  end
+
   local work = data.message
 
   -- Extract authors
@@ -143,18 +190,24 @@ function doi_paper.fetch_crossref(doi)
     end
   end
 
-  -- Extract date
+  -- Extract date: try several fields in order of preference
   local date_str = ""
   local year = nil
   local date_parts = nil
-  if work.published then
-    date_parts = work.published["date-parts"]
-  elseif work["published-print"] then
-    date_parts = work["published-print"]["date-parts"]
-  elseif work["published-online"] then
-    date_parts = work["published-online"]["date-parts"]
-  elseif work.created then
-    date_parts = work.created["date-parts"]
+
+  local published = safe_get(work, "published")
+  local published_print = safe_get(work, "published-print")
+  local published_online = safe_get(work, "published-online")
+  local created = safe_get(work, "created")
+
+  if published then
+    date_parts = safe_get(published, "date-parts")
+  elseif published_print then
+    date_parts = safe_get(published_print, "date-parts")
+  elseif published_online then
+    date_parts = safe_get(published_online, "date-parts")
+  elseif created then
+    date_parts = safe_get(created, "date-parts")
   end
 
   if date_parts and date_parts[1] then
@@ -163,9 +216,19 @@ function doi_paper.fetch_crossref(doi)
     if parts[1] then
       date_str = tostring(parts[1])
       if parts[2] then
-        date_str = date_str .. "-" .. string.format("%02d", parts[2])
+        local m = tonumber(parts[2])
+        if m and m < 10 then
+          date_str = date_str .. "-0" .. tostring(m)
+        else
+          date_str = date_str .. "-" .. tostring(parts[2])
+        end
         if parts[3] then
-          date_str = date_str .. "-" .. string.format("%02d", parts[3])
+          local d = tonumber(parts[3])
+          if d and d < 10 then
+            date_str = date_str .. "-0" .. tostring(d)
+          else
+            date_str = date_str .. "-" .. tostring(parts[3])
+          end
         end
       end
     end
@@ -173,10 +236,14 @@ function doi_paper.fetch_crossref(doi)
 
   -- Extract venue (container-title is journal/conference name)
   local venue = ""
-  if work["container-title"] and #work["container-title"] > 0 then
-    venue = work["container-title"][1]
-  elseif work["event"] and work["event"].name then
-    venue = work["event"].name
+  local container_title = safe_get(work, "container-title")
+  if container_title and #container_title > 0 then
+    venue = container_title[1]
+  else
+    local event = safe_get(work, "event")
+    if event then
+      venue = safe_get(event, "name") or ""
+    end
   end
 
   -- Extract title
@@ -185,11 +252,10 @@ function doi_paper.fetch_crossref(doi)
     title = work.title[1]
   end
 
-  -- Extract abstract (CrossRef sometimes includes it with JATS XML tags)
+  -- Extract abstract (CrossRef sometimes includes JATS XML tags)
   local abstract = ""
   if work.abstract then
     abstract = work.abstract
-    -- Strip JATS XML tags
     abstract = string.gsub(abstract, "<[^>]+>", "")
     abstract = string.trim(abstract)
   end
@@ -212,30 +278,31 @@ function doi_paper.fetch_crossref(doi)
 end
 
 -- Build frontmatter YAML string from metadata
+-- All string values from the API are run through yaml_escape to prevent
+-- injection of arbitrary YAML keys via crafted metadata.
 function doi_paper.build_frontmatter(meta, custom_tags)
   local lines = {}
   table.insert(lines, "---")
-  table.insert(lines, 'title: "' .. string.gsub(meta.title, '"', '\\"') .. '"')
+  table.insert(lines, 'title: "' .. yaml_escape(meta.title) .. '"')
 
-  -- Authors as YAML list
   table.insert(lines, "authors:")
   for _, author in ipairs(meta.authors) do
-    table.insert(lines, '  - "' .. string.gsub(author, '"', '\\"') .. '"')
+    table.insert(lines, '  - "' .. yaml_escape(author) .. '"')
   end
 
-  table.insert(lines, 'doi: "' .. meta.doi .. '"')
-  table.insert(lines, 'url: "' .. meta.url .. '"')
+  table.insert(lines, 'doi: "' .. yaml_escape(meta.doi) .. '"')
+  table.insert(lines, 'url: "' .. yaml_escape(meta.url) .. '"')
 
   if meta.venue and #meta.venue > 0 then
-    table.insert(lines, 'venue: "' .. string.gsub(meta.venue, '"', '\\"') .. '"')
+    table.insert(lines, 'venue: "' .. yaml_escape(meta.venue) .. '"')
   end
 
   if meta.publisher and #meta.publisher > 0 then
-    table.insert(lines, 'publisher: "' .. string.gsub(meta.publisher, '"', '\\"') .. '"')
+    table.insert(lines, 'publisher: "' .. yaml_escape(meta.publisher) .. '"')
   end
 
   if meta.date and #meta.date > 0 then
-    table.insert(lines, 'date: "' .. meta.date .. '"')
+    table.insert(lines, 'date: "' .. yaml_escape(meta.date) .. '"')
   end
 
   if meta.year then
@@ -244,7 +311,6 @@ function doi_paper.build_frontmatter(meta, custom_tags)
 
   table.insert(lines, "type: paper")
 
-  -- Tags
   local tags = custom_tags or {"paper", "unread"}
   table.insert(lines, "tags:")
   for _, tag in ipairs(tags) do
@@ -257,6 +323,8 @@ function doi_paper.build_frontmatter(meta, custom_tags)
 end
 
 -- Build page body
+-- The abstract is sanitized to prevent stray "---" lines from being
+-- interpreted as frontmatter delimiters by the markdown parser.
 function doi_paper.build_page(meta, custom_tags)
   local fm = doi_paper.build_frontmatter(meta, custom_tags)
   local body_lines = {}
@@ -264,7 +332,7 @@ function doi_paper.build_page(meta, custom_tags)
   if meta.abstract and #meta.abstract > 0 then
     table.insert(body_lines, "## Abstract")
     table.insert(body_lines, "")
-    table.insert(body_lines, meta.abstract)
+    table.insert(body_lines, sanitize_body_text(meta.abstract))
     table.insert(body_lines, "")
   end
 
@@ -316,19 +384,16 @@ command.define {
     local page_name_base = doi_paper.sanitize_page_name(meta.title)
     local page_name = cfg.prefix .. "/" .. page_name_base
 
-    -- Let user confirm/edit the page name
     page_name = editor.prompt("Page name", page_name)
     if not page_name then
       return
     end
 
-    -- Check if page exists
     if space.pageExists(page_name) then
       editor.flashNotification("Page already exists: " .. page_name, "error")
       return
     end
 
-    -- Build and write the page
     local content = doi_paper.build_page(meta, cfg.tags)
     space.writePage(page_name, content)
     editor.navigate({kind = "page", page = page_name})
