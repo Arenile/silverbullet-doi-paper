@@ -1,3 +1,8 @@
+---
+name: Library/doi-paper/DOI Paper
+tags: meta/library
+---
+
 # DOI Paper Import
 
 A Space Lua library for creating research paper notes from a DOI. Supports papers registered with CrossRef (ACM Digital Library, IEEE Xplore, and most other publishers) as well as arXiv preprints.
