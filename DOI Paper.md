@@ -83,24 +83,22 @@ function doi_paper.parse_identifier(input)
   input = string.gsub(input, "^https?://dx%.doi%.org/", "")
   input = string.gsub(input, "^https?://arxiv%.org/abs/", "")
 
-  -- Check if it's an arXiv DOI (10.48550/arXiv.XXXX.XXXXX)
-  local arxiv_from_doi = string.match(input, "^10%.48550/arXiv%.(.+)$")
-  if arxiv_from_doi then
-    return { type = "arxiv", id = arxiv_from_doi }
+  -- Check if it's an arXiv DOI already (10.48550/arXiv.XXXX.XXXXX)
+  if string.match(input, "^10%.48550/arXiv%.") then
+    return { type = "doi", id = input }
   end
 
-  -- Check if it's a bare arXiv ID (YYMM.NNNNN or old format like hep-th/9901001)
+  -- Bare arXiv ID (YYMM.NNNNN or old format like hep-th/9901001) -> construct DOI
   if string.match(input, "^%d%d%d%d%.%d%d%d%d%d?v?%d*$") then
-    -- Strip version suffix if present
     local base = string.gsub(input, "v%d+$", "")
-    return { type = "arxiv", id = base }
+    return { type = "doi", id = "10.48550/arXiv." .. base }
   end
   if string.match(input, "^[a-z%-]+/%d+v?%d*$") then
     local base = string.gsub(input, "v%d+$", "")
-    return { type = "arxiv", id = base }
+    return { type = "doi", id = "10.48550/arXiv." .. base }
   end
 
-  -- Otherwise treat as a DOI
+  -- Regular DOI
   if string.match(input, "^10%.") then
     return { type = "doi", id = input }
   end
@@ -213,99 +211,6 @@ function doi_paper.fetch_crossref(doi)
   }
 end
 
--- Fetch metadata from arXiv API
-function doi_paper.fetch_arxiv(arxiv_id)
-  local url = "http://export.arxiv.org/api/query?id_list=" .. arxiv_id .. "&max_results=1"
-  local resp = net.proxyFetch(url)
-
-  if not resp.ok then
-    return nil, "arXiv API returned status " .. tostring(resp.status)
-  end
-
-  local body = resp.body
-
-  -- Simple XML extraction helpers (Space Lua doesn't have an XML parser)
-  local function extract_tag(xml, tag)
-    local pattern = "<" .. tag .. "[^>]*>(.-)</" .. tag .. ">"
-    return string.match(xml, pattern)
-  end
-
-  local function extract_all(xml, tag)
-    local results = {}
-    for content in string.gmatch(xml, "<" .. tag .. "[^>]*>(.-)</" .. tag .. ">") do
-      table.insert(results, content)
-    end
-    return results
-  end
-
-  -- Find the entry
-  local entry = extract_tag(body, "entry")
-  if not entry then
-    return nil, "No entry found in arXiv response"
-  end
-
-  -- Title
-  local title = extract_tag(entry, "title") or ""
-  title = string.gsub(title, "%s+", " ")
-  title = string.trim(title)
-
-  -- Authors
-  local authors = {}
-  local author_blocks = extract_all(entry, "author")
-  for _, block in ipairs(author_blocks) do
-    local name = extract_tag(block, "name")
-    if name then
-      table.insert(authors, string.trim(name))
-    end
-  end
-
-  -- Abstract
-  local abstract = extract_tag(entry, "summary") or ""
-  abstract = string.gsub(abstract, "%s+", " ")
-  abstract = string.trim(abstract)
-
-  -- Published date
-  local published = extract_tag(entry, "published") or ""
-  local date_str = string.sub(published, 1, 10) -- YYYY-MM-DD
-  local year = nil
-  if #date_str >= 4 then
-    year = tonumber(string.sub(date_str, 1, 4))
-  end
-
-  -- Categories (primary)
-  local primary_cat = ""
-  local cat_match = string.match(entry, '<arxiv:primary_category[^>]*term="([^"]*)"')
-  if cat_match then
-    primary_cat = cat_match
-  end
-
-  -- Journal ref if available
-  local journal_ref = extract_tag(entry, "arxiv:journal_ref") or ""
-  journal_ref = string.trim(journal_ref)
-
-  -- DOI if available
-  local doi = extract_tag(entry, "arxiv:doi") or ""
-  doi = string.trim(doi)
-  if #doi == 0 then
-    doi = "10.48550/arXiv." .. arxiv_id
-  end
-
-  return {
-    title = title,
-    authors = authors,
-    doi = doi,
-    url = "https://arxiv.org/abs/" .. arxiv_id,
-    venue = journal_ref,
-    publisher = "arXiv",
-    date = date_str,
-    year = year,
-    abstract = abstract,
-    arxiv_id = arxiv_id,
-    arxiv_category = primary_cat,
-    source = "arxiv"
-  }
-end
-
 -- Build frontmatter YAML string from metadata
 function doi_paper.build_frontmatter(meta, custom_tags)
   local lines = {}
@@ -335,14 +240,6 @@ function doi_paper.build_frontmatter(meta, custom_tags)
 
   if meta.year then
     table.insert(lines, "year: " .. tostring(meta.year))
-  end
-
-  if meta.arxiv_id then
-    table.insert(lines, 'arxivId: "' .. meta.arxiv_id .. '"')
-  end
-
-  if meta.arxiv_category and #meta.arxiv_category > 0 then
-    table.insert(lines, 'arxivCategory: "' .. meta.arxiv_category .. '"')
   end
 
   table.insert(lines, "type: paper")
@@ -403,12 +300,7 @@ command.define {
 
     editor.flashNotification("Fetching metadata...")
 
-    local meta, err
-    if parsed.type == "arxiv" then
-      meta, err = doi_paper.fetch_arxiv(parsed.id)
-    else
-      meta, err = doi_paper.fetch_crossref(parsed.id)
-    end
+    local meta, err = doi_paper.fetch_crossref(parsed.id)
 
     if not meta then
       editor.flashNotification("Failed to fetch metadata: " .. (err or "unknown error"), "error")
