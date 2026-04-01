@@ -13,12 +13,12 @@ Run the **Paper: Import from DOI** command from the command palette. Enter a DOI
 
 ## Supported Identifiers
 
-| Input Format | Example | Resolution Method |
-|---|---|---|
-| DOI (bare) | `10.1145/3582016.3582063` | CrossRef REST API |
-| DOI (URL) | `https://doi.org/10.1145/...` | CrossRef REST API |
-| arXiv ID | `2301.13808` | DataCite REST API |
-| arXiv DOI | `10.48550/arXiv.2301.13808` | DataCite REST API |
+| Input Format | Example                       | Resolution Method |
+| ------------ | ----------------------------- | ----------------- |
+| DOI (bare)   | `10.1145/3582016.3582063`     | CrossRef REST API |
+| DOI (URL)    | `https://doi.org/10.1145/...` | CrossRef REST API |
+| arXiv ID     | `2301.13808`                  | DataCite REST API |
+| arXiv DOI    | `10.48550/arXiv.2301.13808`   | DataCite REST API |
 
 ## Generated Frontmatter
 
@@ -59,6 +59,16 @@ config.set {
 -- priority: 5
 
 doi_paper = doi_paper or {}
+
+config.define("doiPaper", {
+  description = "DOI Paper Import settings",
+  type = "object",
+  properties = {
+    prefix = { type = "string" },
+    tags = { type = "array", items = { type = "string" } }
+  },
+  additionalProperties = false
+})
 
 -- Escape a string for safe inclusion inside a YAML double-quoted value.
 local function yaml_escape(s)
@@ -412,7 +422,7 @@ end
 
 -- Read config values.
 function doi_paper.get_config()
-  local cfg = config.get("doiPaper") or {}
+  local cfg = config.get("") or {}
   return {
     prefix = cfg.prefix or "Papers",
     tags = cfg.tags or {"paper", "unread"}
