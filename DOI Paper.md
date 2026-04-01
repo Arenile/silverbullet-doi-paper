@@ -1,6 +1,9 @@
 ---
 name: Library/doi-paper/DOI Paper
 tags: meta/library
+share.uri: "https://github.com/Arenile/silverbullet-doi-paper/blob/main/DOI%20Paper.md"
+share.hash: f2ac9b09
+share.mode: pull
 ---
 
 # DOI Paper Import
@@ -45,11 +48,9 @@ abstract: "The paper abstract..."
 You can customize the page path prefix and default tags in your `CONFIG` page:
 
 ```space-lua
-config.set {
-  doiPaper = {
-    prefix = "Papers",       -- page path prefix (default: "Papers")
-    tags = {"paper", "unread"} -- default tags (default: {"paper", "unread"})
-  }
+doi_paper.config = {
+  prefix = "Papers",       -- page path prefix (default: "Papers")
+  tags = {"paper", "unread"} -- default tags (default: {"paper", "unread"})
 }
 ```
 
@@ -59,16 +60,6 @@ config.set {
 -- priority: 5
 
 doi_paper = doi_paper or {}
-
-config.define("doiPaper", {
-  description = "DOI Paper Import settings",
-  type = "object",
-  properties = {
-    prefix = { type = "string" },
-    tags = { type = "array", items = { type = "string" } }
-  },
-  additionalProperties = false
-})
 
 -- Escape a string for safe inclusion inside a YAML double-quoted value.
 local function yaml_escape(s)
@@ -422,10 +413,9 @@ end
 
 -- Read config values.
 function doi_paper.get_config()
-  local cfg = config.get("") or {}
   return {
-    prefix = cfg.prefix or "Papers",
-    tags = cfg.tags or {"paper", "unread"}
+    prefix = (doi_paper.config and doi_paper.config.prefix) or "Papers",
+    tags = (doi_paper.config and doi_paper.config.tags) or {"paper", "unread"}
   }
 end
 
@@ -433,6 +423,9 @@ end
 command.define {
   name = "Paper: Import from DOI",
   run = function()
+
+    js.log("doiPaper config:", config.get("doiPaper"))
+
     local input = editor.prompt("Enter DOI or arXiv ID")
     if not input or #string.trim(input) == 0 then
       return
