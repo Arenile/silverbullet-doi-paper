@@ -1,6 +1,6 @@
 # SilverBullet Paper Note from DOI
 
-## DISCLAIMER
+### DISCLAIMER
 
 > This was written almost entirely using Claude Opus 4.6 and at time of writing
 > I have relatively little knowledge of Space Lua (SilverBullet's Lua implementation).
